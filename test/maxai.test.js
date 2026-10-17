@@ -98,3 +98,50 @@ test('ui: token + host guards, agents api, streaming run', async () => {
     assert.ok(bad);
   } finally { server.close(); process.env.PATH = old; }
 });
+
+test('pool: failover on quota, cooldown persisted, parallel batch, race', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'maxai-p-'));
+  const mk = (name, body) => { const p = path.join(dir, name); fs.writeFileSync(p, `#!/bin/sh\n${body}\n`); fs.chmodSync(p, 0o755); };
+  mk('amp', 'echo "Error: rate limit exceeded, try again in 30 minutes" >&2; exit 1');
+  mk('droid', 'sleep 0.4; echo "droid: $*"');
+  mk('opencode', 'sleep 0.4; echo "opencode: $*"');
+  const env = { ...process.env, PATH: `${dir}:/usr/bin:/bin`, XDG_CONFIG_HOME: dir, XDG_STATE_HOME: dir, HOME: dir };
+  const sh = (...a) => spawnSync(process.execPath, [bin, ...a], { env, encoding: 'utf8', cwd: dir, input: '' });
+  let r = sh('pool', '-a', 'amp,droid', 'hello');
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /droid: exec hello/);
+  assert.match(r.stderr, /amp quota/);
+  r = sh('pool', 'status', '--json');
+  const amp = JSON.parse(r.stdout).find((l) => l.name === 'amp');
+  assert.equal(amp.state, 'cooling');
+  assert.ok(amp.cooldownSec > 1700);
+  // 6 tasks, 2 healthy lanes x 3 slots => all run at once (~0.4s, not 2.4s)
+  fs.writeFileSync(path.join(dir, 't.txt'), 'a\nb\nc\nd\ne\nf\n');
+  const t0 = Date.now();
+  r = sh('pool', '--batch', 't.txt', '--per-lane', '3');
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(Date.now() - t0 < 2000, `took ${Date.now() - t0}ms`);
+  assert.equal((r.stdout.match(/^###/gm) || []).length, 6);
+  r = sh('pool', '--race', '2', '--json', 'go');
+  assert.equal(JSON.parse(r.stdout).ok, true);
+  r = sh('pool', 'reset');
+  assert.equal(JSON.parse(sh('pool', 'status', '--json').stdout).find((l) => l.name === 'amp').state, 'ready');
+  // bare `run` goes through the pool too
+  r = sh('hello', 'there');
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /(droid|opencode): /);
+});
+
+test('pool: refreshLanes mid-flight does not leak slots (regression)', async () => {
+  const { Pool } = await import('../src/pool.js');
+  const lanes = [{ name: 'a', agent: 'a', concurrency: 1, weight: 1, inFlight: 0, lastUsed: 0 }];
+  const run = () => new Promise((r) => setTimeout(() => r({ code: 0, out: 'ok', err: '', ms: 1 }), 50));
+  const pool = new Pool({ agents: {} }, { lanes, run, state: path.join(os.tmpdir(), `maxai-s-${Date.now()}.json`) });
+  pool.refreshLanes = pool.refreshLanes.bind(pool);
+  const jobs = [pool.submit('x'), pool.submit('y'), pool.submit('z')];
+  pool.cfg = { pool: { lanes: [{ agent: 'a' }] }, agents: {} };
+  pool.refreshLanes(['a']);
+  const rs = await Promise.all(jobs);
+  assert.ok(rs.every((r) => r.ok));
+  assert.equal(pool.lanes[0].inFlight, 0);
+});

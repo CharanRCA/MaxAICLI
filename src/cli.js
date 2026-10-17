@@ -5,12 +5,18 @@ import { locate, buildCommand, runInherit, runCapture } from './runner.js';
 import { pickAgent } from './router.js';
 import { status, plan, describe, installAgent } from './installer.js';
 import { startUI } from './ui.js';
+import { Pool } from './pool.js';
 import readline from 'node:readline/promises';
 
 const HELP = `maxai - one CLI for many coding agents
 
 Usage:
-  maxai [run] [options] <prompt>      one-shot prompt (auto-picks an installed agent)
+  maxai [run] [options] <prompt>      one prompt on the POOL: load-balanced over every installed
+                                      agent's free quota, with automatic failover
+  maxai pool --batch tasks.txt        many prompts in parallel across the whole pool
+                                      (one per line, '-' = stdin; JSONL {"prompt":..} ok)
+  maxai pool --race 3 <prompt>        same prompt on 3 agents at once, fastest answer wins
+  maxai pool status | reset [lane]    show lanes/quota cooldowns, or clear them
   maxai <agent> <prompt>              one-shot prompt on a specific agent
   maxai chat [-a agent] [prompt]      interactive session in that agent's own TUI
   maxai compare [-a a,b|all] <prompt> run on several agents in parallel, print side by side
@@ -29,6 +35,7 @@ Options:
       --dry-run           print the command that would run
       --timeout <sec>     kill an agent after N seconds (compare/fallback/json)
   -h, --help
+Pool options: --batch <file|->, --race <n>, --per-lane <n> (concurrency per lane), --no-wait
 Install options: --yes (no confirmation), --force (reinstall even if present), --dry-run
 Prompt may also be piped on stdin.
 `;
@@ -47,6 +54,10 @@ function parse(argv) {
     else if (a === '-y' || a === '--yolo') o.yolo = true;
     else if (a === '--json') o.json = true;
     else if (a === '--yes') o.yes = true;
+    else if (a === '--batch') o.batch = val();
+    else if (a === '--race') o.race = Number(val());
+    else if (a === '--per-lane') o.perLane = Number(val());
+    else if (a === '--no-wait') o.noWait = true;
     else if (a === '--force') o.force = true;
     else if (a === '--open') o.open = true;
     else if (a === '--port') o.port = Number(val());
@@ -92,6 +103,7 @@ function cmdList(cfg, o) {
 }
 
 async function cmdRun(cfg, o, words) {
+  if (!o.agent && !o.dry && !o.json && !o.fallback && !o.timeout) return cmdPool(cfg, o, words);
   const prompt = await getPrompt(o, words);
   if (!prompt) throw new Error('no prompt given');
   const inst = installedIds(cfg);
@@ -151,6 +163,58 @@ async function cmdChat(cfg, o, words) {
   return runInherit(cmd, { cwd: o.cwd });
 }
 
+function lineLabel(s, n = 60) { s = s.replace(/\s+/g, ' '); return s.length > n ? s.slice(0, n - 1) + '…' : s; }
+
+async function cmdPool(cfg, o, words) {
+  if (o.perLane) cfg = { ...cfg, pool: { ...cfg.pool, concurrency: o.perLane } };
+  const pool = new Pool(cfg);
+  const sub = words[0];
+  if (sub === 'status') {
+    const st = pool.status();
+    if (o.json) { console.log(JSON.stringify(st, null, 2)); return 0; }
+    if (!st.length) { console.log('no lanes: no supported agent CLI is installed. Try `maxai install`.'); return 1; }
+    for (const l of st) {
+      const flag = l.state === 'ready' ? '✔' : l.state === 'needs-login' ? '🔑' : '⏳';
+      const extra = l.state === 'ready' ? '' : ` (${l.reason}, ${Math.ceil(l.cooldownSec / 60)}m left)`;
+      console.log(`${flag} ${l.name.padEnd(28)} ${l.state}${extra}  slots ${l.concurrency}  ok ${l.ok} fail ${l.fail} quota-hits ${l.quotaHits}`);
+    }
+    console.log(`\npool capacity: ${st.filter((l) => l.state === 'ready').reduce((n, l) => n + l.concurrency, 0)} parallel requests`);
+    return 0;
+  }
+  if (sub === 'reset') { pool.reset(words[1]); console.log('pool state cleared'); return 0; }
+  const pin = o.agent ? ids(o.agent) : undefined;
+  const opts = { pin, cwd: o.cwd, yolo: o.yolo ?? cfg.yolo, wait: !o.noWait };
+  if (!pool.lanes.length) throw new Error('no supported agent CLI found on PATH. Run `maxai install`.');
+  pool.on('attempt', (a) => { if (a.kind !== 'ok' && a.kind !== 'aborted') console.error(`maxai: ${a.lane} ${a.kind}${a.err ? ' - ' + lineLabel(a.err, 80) : ''} -> failing over`); });
+
+  let prompts;
+  if (o.batch) {
+    const raw = o.batch === '-' ? await readStdin() : fs.readFileSync(o.batch, 'utf8');
+    prompts = raw.split('\n').map((l) => l.trim()).filter(Boolean).map((l) => { if (l[0] === '{') { try { return JSON.parse(l).prompt; } catch {} } return l; });
+    if (!prompts.length) throw new Error('batch file has no prompts');
+  } else {
+    const p = await getPrompt(o, words[0] === 'run' ? words.slice(1) : words);
+    if (!p) throw new Error('no prompt given');
+    prompts = [p];
+  }
+
+  if (o.dry) { for (const l of pool.status()) console.log(`lane ${l.name} (slots ${l.concurrency}, ${l.state})`); console.log(`${prompts.length} task(s)`); return 0; }
+  let done = 0, failed = 0;
+  const finish = (i, r) => {
+    done++; if (!r.ok) failed++;
+    if (o.json) console.log(JSON.stringify({ index: i, ...r }));
+    else if (prompts.length === 1) { if (r.ok) process.stdout.write(r.output.endsWith('\n') ? r.output : r.output + '\n'); else console.error(`maxai: failed - ${r.error}`); }
+    else {
+      console.error(`[${done}/${prompts.length}] ${r.ok ? '✔ ' + r.lane : '✘ ' + r.error} · ${(r.ms / 1000).toFixed(1)}s · ${lineLabel(r.prompt)}`);
+      if (r.ok) console.log(`### ${i + 1}: ${lineLabel(r.prompt)}\n${r.output.trim()}\n`);
+    }
+  };
+  if (o.race > 1) { const r = await pool.race(prompts[0], o.race, opts); finish(0, r); return r.ok ? 0 : 1; }
+  await Promise.all(prompts.map((p, i) => pool.submit(p, opts).then((r) => finish(i, r))));
+  if (prompts.length > 1) console.error(`\npool done: ${done - failed} ok, ${failed} failed`);
+  return failed ? 1 : 0;
+}
+
 async function cmdInstall(cfg, o, words) {
   const want = !words.length || words.includes('missing') ? 'missing' : words.includes('all') ? 'all' : null;
   const targets = want ? Object.keys(ADAPTERS) : words.flatMap((w) => ids(w));
@@ -207,6 +271,7 @@ export async function main(argv) {
         console.log(JSON.stringify(cfg, null, 2)); return 0;
       case 'install': return await cmdInstall(cfg, o, rest);
       case 'ui': return await cmdUI(cfg, o);
+      case 'pool': return await cmdPool(cfg, o, rest);
       case 'run': return await cmdRun(cfg, o, rest);
       case 'chat': return await cmdChat(cfg, o, rest);
       case 'compare': return await cmdCompare(cfg, o, rest);

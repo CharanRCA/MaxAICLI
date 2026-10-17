@@ -5,11 +5,15 @@ import { fileURLToPath } from 'node:url';
 import { ADAPTERS, resolveId } from './adapters.js';
 import { buildCommand, locate, runCapture } from './runner.js';
 import { status, plan, describe, installAgent } from './installer.js';
+import { Pool } from './pool.js';
+import { ADAPTERS as ALL } from './adapters.js';
 
 const PAGE = fs.readFileSync(fileURLToPath(new URL('./ui.html', import.meta.url)), 'utf8');
 
 // Local-only web UI. Guards: loopback bind, Host check (DNS rebinding), per-launch token.
 export function startUI(cfg, { port = 4747, host = '127.0.0.1', cwd = process.cwd() } = {}) {
+  const pool = new Pool(cfg);
+  const installedNow = () => Object.keys(ALL).filter((id) => locate(id, cfg));
   const token = crypto.randomBytes(16).toString('hex');
   const hostOk = (h) => /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/.test(h || '');
   const send = (res, code, body, type = 'application/json') => {
@@ -39,6 +43,33 @@ export function startUI(cfg, { port = 4747, host = '127.0.0.1', cwd = process.cw
           return { ...s, installCmd: p.recipe ? describe(p.recipe) : null, manual: p.manual };
         }));
         return send(res, 200, rows);
+      }
+
+      if (url.pathname === '/api/pool') { pool.refreshLanes(installedNow()); return send(res, 200, pool.status()); }
+      if (req.method === 'POST' && url.pathname === '/api/pool/reset') { pool.reset((await body(req)).lane); return send(res, 200, pool.status()); }
+      if (req.method === 'POST' && url.pathname === '/api/pool/run') {
+        const { prompts = [], race, yolo, dir, perLane } = await body(req);
+        const list = prompts.map((p) => String(p).trim()).filter(Boolean);
+        if (!list.length) return send(res, 400, { error: 'no prompts' });
+        pool.refreshLanes(installedNow());
+        if (perLane) for (const l of pool.lanes) l.concurrency = perLane;
+        if (!pool.lanes.length) return send(res, 400, { error: 'no installed agents - install some first' });
+        const emit = stream(res);
+        const ac = new AbortController();
+        res.on('close', () => ac.abort());
+        const tags = new Set(); const tag = (t) => tags.has(t);
+        const onStart = (e) => tag(e.tag) && emit({ type: 'start', ...e });
+        const onResult = (e) => tag(e.tag) && emit({ type: 'attempt', ...e });
+        pool.on('start', onStart); pool.on('result', onResult);
+        try {
+          await Promise.all(list.map(async (prompt, i) => {
+            const t = `${token}:${Date.now()}:${i}`; tags.add(t);
+            const o = { cwd: dir || cwd, yolo: !!yolo, signal: ac.signal, tag: t };
+            const r = race > 1 ? await pool.race(prompt, race, o) : await pool.submit(prompt, o);
+            emit({ type: 'done', index: i, tag: t, ok: r.ok, lane: r.lane, output: r.output, error: r.error, ms: r.ms, attempts: r.attempts });
+          }));
+        } finally { pool.off('start', onStart); pool.off('result', onResult); }
+        return res.end();
       }
 
       if (req.method === 'POST' && url.pathname === '/api/run') {

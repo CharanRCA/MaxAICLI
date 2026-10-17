@@ -30,6 +30,10 @@ maxai --dry-run -a kiro "hi"              # show the exact command without runni
 ```
 
 ```
+maxai "any prompt"                        # uses the POOL by default (see below)
+maxai pool --batch tasks.txt              # many prompts in parallel across all agents
+maxai pool --race 3 "hard question"       # same prompt on 3 agents, first good answer wins
+maxai pool status                         # lanes, free slots, quota cooldowns
 maxai ui --open                           # local web UI (http://127.0.0.1:4747)
 maxai install                             # install every missing agent CLI (asks first)
 maxai install opencode droid --yes        # specific ones, no prompt
@@ -39,11 +43,36 @@ maxai install all --dry-run               # show what would run
 Flags: `-a agent[,agent]`, `-m model`, `-f fallbacks`, `-C dir`, `-y/--yolo` (auto-approve tools),
 `--json`, `--timeout sec`, `--dry-run`.
 
+## The pool (combined free quota)
+
+Every installed agent CLI becomes a **lane**; a lane is one (agent, model) pair, i.e. one
+quota bucket, so you can add several free models of one agent as separate lanes. `maxai`
+dispatches work across all lanes at once and:
+
+- **balances load** by free slots and weight, so N tasks run on N lanes in parallel;
+- **detects quota/rate-limit/overload errors** (and "try again in 30 minutes" hints),
+  puts that lane on a cooldown (persisted in `~/.local/state/maxai/pool.json`, exponential
+  up to 6 h) and **retries the task on another lane**;
+- marks lanes that need a login as such instead of hammering them (`maxai pool reset` clears);
+- can **race** several lanes and keep the fastest answer (the losers are killed).
+
+Each lane uses *your own* login with that vendor and that vendor's own free tier. The pool
+just spreads load and backs off when told to; it doesn't share credentials or evade limits.
+Tune it in config:
+
+```json
+{ "pool": { "concurrency": 2, "exclude": ["rovodev"],
+    "lanes": [ { "agent": "opencode", "model": "provider/free-model-a", "concurrency": 3 },
+               { "agent": "opencode", "model": "provider/free-model-b" },
+               { "agent": "kimi", "weight": 2 } ] } }
+```
+
 ## Web UI
 
 `maxai ui` serves a local page: agent list with install status/version, one-click install
-with live logs, a prompt box, and side-by-side streaming output when several agents are
-selected. It binds to loopback only, checks the Host header and requires a per-launch
+with live logs, a live **pool panel** (lanes, busy slots, cooldowns, total parallel capacity), a prompt box
+where each line becomes a task fanned out across the pool (with the failover trail shown per task),
+and a Compare mode for side-by-side output from chosen agents. It binds to loopback only, checks the Host header and requires a per-launch
 token, because it can execute commands on your machine.
 
 ## Installer

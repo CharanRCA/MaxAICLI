@@ -53,6 +53,20 @@ dialog{border:1px solid var(--line);border-radius:var(--r);background:var(--pane
 dialog::backdrop{background:#0008}
 dialog .hd{display:flex;align-items:center;padding:12px 16px;border-bottom:1px solid var(--line)}
 dialog .hd b{flex:1}
+
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:9px;overflow:hidden}
+.seg button{border:0;border-radius:0;background:transparent;padding:6px 14px;color:var(--mute)}
+.seg button.on{background:var(--acc);color:var(--acc-ink);font-weight:600}
+.lane{padding:9px 16px;border-top:1px solid var(--line)}
+.lane .top{display:flex;align-items:center;gap:8px}
+.lane .top b{flex:1;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.slots{display:flex;gap:3px;margin-top:6px}
+.slots i{width:14px;height:6px;border-radius:2px;background:var(--line)}
+.slots i.use{background:var(--acc)}
+.lane.cool .slots i{background:var(--line)}
+.stat{font-size:11.5px;color:var(--mute)}
+.total{padding:10px 16px;border-top:1px solid var(--line);font-size:12.5px;display:flex;align-items:center;gap:8px}
+.attempts{padding:6px 14px;font-size:11.5px;color:var(--mute);border-bottom:1px solid var(--line)}
 </style>
 </head>
 <body>
@@ -63,18 +77,27 @@ dialog .hd b{flex:1}
   <button id="instAll" class="small">Install all missing</button>
 </header>
 <main>
-  <aside class="card">
+  <aside>
+  <div class="card" style="margin-bottom:16px">
+    <h2>Free-model pool <span class="spacer"></span><a href="#" id="poolReset" class="hint">reset cooldowns</a></h2>
+    <div id="lanes"></div><div class="total" id="poolTotal"></div>
+  </div>
+  <div class="card">
     <h2>Agents <span class="spacer"></span><a href="#" id="selInst" class="hint">select installed</a></h2>
     <div id="agents"></div>
+  </div>
   </aside>
   <section>
     <div class="card">
-      <h2>Prompt</h2>
+      <h2>Prompt <span class="spacer"></span>
+        <span class="seg"><button id="mPool" class="on" title="Spread work across every agent's free quota, with automatic failover">Pool</button><button id="mPick" title="Run on the agents ticked on the left, side by side">Compare</button></span></h2>
       <div class="composer">
-        <textarea id="prompt" placeholder="Ask any agent... (Ctrl/Cmd+Enter to run). Select several agents on the left to compare them side by side."></textarea>
+        <textarea id="prompt" placeholder="Pool mode: every installed agent's free quota is used together. Put one task per line to fan out in parallel. (Ctrl/Cmd+Enter)"></textarea>
         <div class="row">
           <input type="text" id="model" placeholder="model (optional)" size="18">
           <input type="text" id="dir" size="30" value="__CWD__" title="working directory">
+          <label class="chk" id="batchL"><input type="checkbox" id="batch" checked> one task per line</label>
+          <label class="chk" id="raceL"><input type="checkbox" id="race"> race 3 agents</label>
           <label class="chk"><input type="checkbox" id="yolo"> auto-approve tools</label>
           <span class="spacer"></span>
           <button id="stop" disabled>Stop</button>
@@ -91,7 +114,7 @@ dialog .hd b{flex:1}
 const TOKEN='__TOKEN__';
 const $=s=>document.querySelector(s);
 const H={'x-maxai-token':TOKEN,'content-type':'application/json'};
-let agents=[],sel=new Set(),ctl=null;
+let agents=[],sel=new Set(),ctl=null,mode='pool';
 try{sel=new Set(JSON.parse(localStorage.getItem('maxai.sel')||'[]'));$('#prompt').value=localStorage.getItem('maxai.prompt')||''}catch{}
 
 async function ndjson(path,body,onEv,signal){
@@ -123,6 +146,7 @@ function render(){
     box.append(row);
   }
   const n=[...sel].filter(id=>agents.find(a=>a.id===id&&a.installed)).length;
+  if(mode==='pool'){const rdy=(window.lanes||[]).filter(l=>l.state==='ready').length;$('#selHint').textContent=rdy?`Pool mode: using all ${rdy} ready lane${rdy>1?'s':''} (agent ticks are ignored); failed or rate-limited lanes are skipped automatically.`:'No ready lanes - install an agent or wait for cooldowns.';return}
   $('#selHint').textContent=n?`${n} agent${n>1?'s':''} selected${n>1?' - running in parallel':''}`:'Select at least one installed agent.';
 }
 const save=()=>{try{localStorage.setItem('maxai.sel',JSON.stringify([...sel]));localStorage.setItem('maxai.prompt',$('#prompt').value)}catch{};render()};
@@ -130,8 +154,12 @@ const save=()=>{try{localStorage.setItem('maxai.sel',JSON.stringify([...sel]));l
 $('#selInst').onclick=e=>{e.preventDefault();sel=new Set(agents.filter(a=>a.installed).map(a=>a.id));save()};
 $('#refresh').onclick=load;
 $('#prompt').oninput=()=>{try{localStorage.setItem('maxai.prompt',$('#prompt').value)}catch{}};
-$('#prompt').onkeydown=e=>{if(e.key==='Enter'&&(e.ctrlKey||e.metaKey))run()};
-$('#run').onclick=run;
+$('#prompt').onkeydown=e=>{if(e.key==='Enter'&&(e.ctrlKey||e.metaKey))$('#run').click()};
+$('#run').onclick=()=>mode==='pool'?runPool():run();
+$('#mPool').onclick=()=>setMode('pool');$('#mPick').onclick=()=>setMode('pick');
+function setMode(m){mode=m;$('#mPool').classList.toggle('on',m==='pool');$('#mPick').classList.toggle('on',m==='pick');
+  $('#batchL').style.display=$('#raceL').style.display=m==='pool'?'':'none';render()}
+$('#poolReset').onclick=async e=>{e.preventDefault();await fetch('/api/pool/reset',{method:'POST',headers:H,body:'{}'});loadPool()};
 $('#stop').onclick=()=>ctl&&ctl.abort();
 $('#logX').onclick=()=>$('#log').close();
 $('#instAll').onclick=()=>install(agents.filter(a=>!a.installed).map(a=>a.id));
@@ -175,7 +203,44 @@ async function install(ids){
   }catch(e){add('\nError: '+e.message+'\n')}
   add('\nFinished.\n');load();
 }
-load();
+
+async function loadPool(){
+  try{const r=await fetch('/api/pool',{headers:H});window.lanes=await r.json()}catch{return}
+  const box=$('#lanes');box.textContent='';let cap=0;
+  for(const l of lanes){
+    const d=el('div','lane'+(l.state==='ready'?'':' cool')),top=el('div','top');
+    const label=l.state==='ready'?(l.inFlight?'busy':'ready'):l.state==='needs-login'?'needs login':`cooling ${Math.ceil(l.cooldownSec/60)}m`;
+    top.append(el('span','dot '+(l.state==='ready'?'ok':'bad')),el('b','',l.name),el('span','stat',label));
+    const sl=el('div','slots');for(let i=0;i<l.concurrency;i++)sl.append(el('i',i<l.inFlight?'use':''));
+    d.append(top,sl,el('div','stat',`${l.ok} ok · ${l.fail} failed · ${l.quotaHits} quota hits`));box.append(d);
+    if(l.state==='ready')cap+=l.concurrency;
+  }
+  if(!lanes.length)box.append(el('div','empty','No agents installed yet.'));
+  $('#poolTotal').textContent=`Capacity: ${cap} parallel request${cap===1?'':'s'} across ${lanes.filter(l=>l.state==='ready').length} ready lane(s)`;
+  if(mode==='pool')render();
+}
+async function runPool(){
+  const text=$('#prompt').value.trim();if(!text){$('#selHint').textContent='Type a prompt first.';return}
+  const prompts=$('#batch').checked?text.split('\n').map(x=>x.trim()).filter(Boolean):[text];
+  const out=$('#results');out.textContent='';const P=[];
+  prompts.forEach((t,i)=>{const c=el('div','card res'),hd=el('div','hd'),pill=el('span','pill run','queued'),at=el('div','attempts','waiting for a free lane...'),pre=el('pre');
+    hd.append(el('b','',prompts.length>1?`Task ${i+1}: ${t.slice(0,48)}${t.length>48?'…':''}`:'Result'),pill);c.append(hd,at,pre);out.append(c);P.push({pill,at,pre,trail:[]})});
+  ctl=new AbortController();$('#run').disabled=true;$('#stop').disabled=false;
+  const iv=setInterval(loadPool,1500);
+  try{
+    await ndjson('/api/pool/run',{prompts,race:$('#race').checked?3:0,yolo:$('#yolo').checked,dir:$('#dir').value.trim()||undefined},ev=>{
+      const i=ev.type==='done'?ev.index:Number(ev.tag.split(':').pop()),p=P[i];if(!p)return;
+      if(ev.type==='start'){p.pill.textContent='running on '+ev.lane;p.at.textContent='attempt '+(p.trail.length+1)+' -> '+ev.lane}
+      else if(ev.type==='attempt'){p.trail.push(`${ev.lane}: ${ev.kind}`);p.at.textContent=p.trail.join('  →  ')}
+      else if(ev.type==='done'){p.pill.className='pill '+(ev.ok?'ok':'bad');p.pill.textContent=ev.ok?`${ev.lane} · ${(ev.ms/1000).toFixed(1)}s`:'failed';
+        p.at.textContent=(ev.attempts||[]).map(a=>`${a.lane}: ${a.kind}`).join('  →  ')||'-';p.pre.textContent=ev.ok?ev.output:(ev.error||'failed')}
+    },ctl.signal);
+  }catch(e){if(e.name!=='AbortError')out.prepend(el('div','card empty','Error: '+e.message))}
+  clearInterval(iv);loadPool();
+  for(const p of P)if(/queued|running/.test(p.pill.textContent)){p.pill.className='pill bad';p.pill.textContent='stopped'}
+  $('#run').disabled=false;$('#stop').disabled=true;
+}
+load();loadPool();setInterval(()=>{if(!$('#run').disabled)loadPool()},10000);
 </script>
 </body>
 </html>
