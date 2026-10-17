@@ -1,0 +1,10 @@
+{
+  "name": "maxaicli",
+  "version": "0.1.0",
+  "description": "One CLI that drives Kiro, OpenCode, Antigravity, Copilot, Qoder, Amp, Rovo Dev, Kimi and Droid",
+  "type": "module",
+  "bin": { "maxai": "bin/maxai.js" },
+  "engines": { "node": ">=18" },
+  "scripts": { "test": "node --test test/*.test.js" },
+  "license": "MIT"
+}
