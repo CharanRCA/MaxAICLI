@@ -44,7 +44,7 @@ test('e2e: fake agent on PATH, run + fallback + compare', () => {
   const mk = (name, body) => { const p = path.join(dir, name); fs.writeFileSync(p, `#!/bin/sh\n${body}\n`); fs.chmodSync(p, 0o755); };
   mk('droid', 'echo "droid got: $*"');
   mk('amp', 'echo boom >&2; exit 3');
-  const env = { ...process.env, PATH: `${dir}:${process.env.PATH}`, XDG_CONFIG_HOME: dir };
+  const env = { ...process.env, PATH: `${dir}:/usr/bin:/bin`, XDG_CONFIG_HOME: dir, HOME: dir };
   const sh = (...a) => spawnSync(process.execPath, [bin, ...a], { env, encoding: 'utf8', cwd: dir, input: '' });
   let r = sh('droid', 'fix', 'bug');
   assert.match(r.stdout, /droid got: exec fix bug/);
