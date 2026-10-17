@@ -8,13 +8,18 @@ import { status, plan, describe, installAgent } from './installer.js';
 import { Pool } from './pool.js';
 import { ADAPTERS as ALL } from './adapters.js';
 
-const PAGE = fs.readFileSync(fileURLToPath(new URL('./ui.html', import.meta.url)), 'utf8');
+// The standalone build embeds the page as a global; from source it is read from disk.
+const loadPage = () => globalThis.__MAXAI_UI_HTML__ ?? fs.readFileSync(fileURLToPath(new URL('./ui.html', import.meta.url)), 'utf8');
+
+const escapeHtml = (x) => String(x).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 // Local-only web UI. Guards: loopback bind, Host check (DNS rebinding), per-launch token.
-export function startUI(cfg, { port = 4747, host = '127.0.0.1', cwd = process.cwd() } = {}) {
+export function startUI(cfg, { port = 4747, host = '127.0.0.1', cwd = process.cwd(), fallback = false } = {}) {
+  const PAGE = loadPage();
   const pool = new Pool(cfg);
   const installedNow = () => Object.keys(ALL).filter((id) => locate(id, cfg));
   const token = crypto.randomBytes(16).toString('hex');
+  const tokenOk = (t) => typeof t === 'string' && t.length === token.length && crypto.timingSafeEqual(Buffer.from(t), Buffer.from(token));
   const hostOk = (h) => /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/.test(h || '');
   const send = (res, code, body, type = 'application/json') => {
     res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store' });
@@ -33,8 +38,8 @@ export function startUI(cfg, { port = 4747, host = '127.0.0.1', cwd = process.cw
     try {
       if (!hostOk(req.headers.host)) return send(res, 403, { error: 'bad host' });
       const url = new URL(req.url, 'http://x');
-      if (req.method === 'GET' && url.pathname === '/') return send(res, 200, PAGE.replace('__TOKEN__', token).replace('__CWD__', JSON.stringify(cwd).slice(1, -1)), 'text/html; charset=utf-8');
-      if (req.headers['x-maxai-token'] !== token) return send(res, 401, { error: 'bad token' });
+      if (req.method === 'GET' && url.pathname === '/') return send(res, 200, PAGE.replace('__TOKEN__', () => token).replace('__CWD__', () => escapeHtml(cwd)), 'text/html; charset=utf-8');
+      if (!tokenOk(req.headers['x-maxai-token'])) return send(res, 401, { error: 'bad token' });
 
       if (url.pathname === '/api/agents') {
         const rows = await Promise.all(Object.keys(ADAPTERS).map(async (id) => {
@@ -110,8 +115,12 @@ export function startUI(cfg, { port = 4747, host = '127.0.0.1', cwd = process.cw
       if (!res.headersSent) send(res, 500, { error: e.message }); else res.end();
     }
   });
-  return new Promise((ok, bad) => {
-    server.on('error', bad);
-    server.listen(port, host, () => ok({ server, url: `http://${host}:${server.address().port}/`, token }));
+  // If the default port is taken, try the next few; an explicit port must be honored.
+  const listen = (p, left) => new Promise((ok, bad) => {
+    const onErr = (e) => { server.off('listening', onOk); (e.code === 'EADDRINUSE' && left > 0 && fallback) ? listen(p + 1, left - 1).then(ok, bad) : bad(e); };
+    const onOk = () => { server.off('error', onErr); ok({ server, url: `http://${host}:${server.address().port}/`, token }); };
+    server.once('error', onErr); server.once('listening', onOk);
+    server.listen(p, host);
   });
+  return listen(port, 10);
 }

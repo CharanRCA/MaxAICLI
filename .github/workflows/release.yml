@@ -1,0 +1,21 @@
+name: release
+on:
+  push:
+    tags: ['v*']
+jobs:
+  binaries:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, macos-13, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: npm ci
+      - run: npm test
+        if: matrix.os == 'ubuntu-latest'
+      - run: npm run build:binary
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/maxaicli-*

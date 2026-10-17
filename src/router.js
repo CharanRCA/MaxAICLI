@@ -2,7 +2,7 @@
 const RULES = [
   [/\b(spec|requirements?|design doc|plan)\b/i, ['kiro', 'amp', 'opencode']],
   [/\b(jira|confluence|bitbucket|atlassian)\b/i, ['rovodev']],
-  [/\b(pull request|\bpr\b|github|issue|gh )\b/i, ['copilot', 'droid']],
+  [/\b(pull request|pr|github|issues?|gh)\b/i, ['copilot', 'droid']],
   [/\b(refactor|migrate|large|monorepo|whole repo)\b/i, ['amp', 'droid', 'opencode']],
   [/\b(chinese|中文|translate)\b/i, ['kimi', 'qoder']],
 ];

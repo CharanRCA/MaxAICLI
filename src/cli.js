@@ -7,6 +7,12 @@ import { status, plan, describe, installAgent } from './installer.js';
 import { startUI } from './ui.js';
 import { Pool } from './pool.js';
 import readline from 'node:readline/promises';
+import { repl } from './repl.js';
+
+function version() {
+  if (typeof __MAXAI_VERSION__ !== 'undefined') return __MAXAI_VERSION__; // injected by scripts/build.mjs
+  try { return JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version; } catch { return 'dev'; }
+}
 
 const HELP = `maxai - one CLI for many coding agents
 
@@ -34,10 +40,11 @@ Options:
       --json              (run/compare) print machine-readable JSON, captured not streamed
       --dry-run           print the command that would run
       --timeout <sec>     kill an agent after N seconds (compare/fallback/json)
-  -h, --help
+  -h, --help      -v, --version
 Pool options: --batch <file|->, --race <n>, --per-lane <n> (concurrency per lane), --no-wait
 Install options: --yes (no confirmation), --force (reinstall even if present), --dry-run
-Prompt may also be piped on stdin.
+With no arguments on a terminal, maxai opens an interactive session on the pool.
+Prompt may be piped on stdin (add --stdin to append stdin to a prompt given as words).
 `;
 
 function parse(argv) {
@@ -54,6 +61,7 @@ function parse(argv) {
     else if (a === '-y' || a === '--yolo') o.yolo = true;
     else if (a === '--json') o.json = true;
     else if (a === '--yes') o.yes = true;
+    else if (a === '--stdin') o.stdin = true;
     else if (a === '--batch') o.batch = val();
     else if (a === '--race') o.race = Number(val());
     else if (a === '--per-lane') o.perLane = Number(val());
@@ -63,6 +71,7 @@ function parse(argv) {
     else if (a === '--port') o.port = Number(val());
     else if (a === '--dry-run') o.dry = true;
     else if (a === '-h' || a === '--help') o.help = true;
+    else if (a === '-v' || a === '--version') o.version = true;
     else if (a.startsWith('-') && a.length > 1) throw new Error(`unknown option ${a}`);
     else o._.push(a);
   }
@@ -82,9 +91,11 @@ async function readStdin() {
   return s.trim();
 }
 
+// Words are the prompt; with none, piped stdin is the prompt. With both, stdin is
+// appended only when asked (--stdin): an inherited-but-idle pipe must never hang a command.
 async function getPrompt(o, words) {
   const arg = words.join(' ').trim();
-  const piped = await readStdin();
+  const piped = !arg || o.stdin ? await readStdin() : '';
   return [arg, piped].filter(Boolean).join('\n\n');
 }
 
@@ -103,7 +114,7 @@ function cmdList(cfg, o) {
 }
 
 async function cmdRun(cfg, o, words) {
-  if (!o.agent && !o.dry && !o.json && !o.fallback && !o.timeout) return cmdPool(cfg, o, words);
+  if (!o.agent && !o.dry && !o.json && !o.fallback && !o.timeout) return poolRun(cfg, o, words);
   const prompt = await getPrompt(o, words);
   if (!prompt) throw new Error('no prompt given');
   const inst = installedIds(cfg);
@@ -165,27 +176,39 @@ async function cmdChat(cfg, o, words) {
 
 function lineLabel(s, n = 60) { s = s.replace(/\s+/g, ' '); return s.length > n ? s.slice(0, n - 1) + '…' : s; }
 
-async function cmdPool(cfg, o, words) {
+function poolFor(cfg, o) {
   if (o.perLane) cfg = { ...cfg, pool: { ...cfg.pool, concurrency: o.perLane } };
-  const pool = new Pool(cfg);
-  const sub = words[0];
-  if (sub === 'status') {
-    const st = pool.status();
-    if (o.json) { console.log(JSON.stringify(st, null, 2)); return 0; }
-    if (!st.length) { console.log('no lanes: no supported agent CLI is installed. Try `maxai install`.'); return 1; }
-    for (const l of st) {
-      const flag = l.state === 'ready' ? '✔' : l.state === 'needs-login' ? '🔑' : '⏳';
-      const extra = l.state === 'ready' ? '' : ` (${l.reason}, ${Math.ceil(l.cooldownSec / 60)}m left)`;
-      console.log(`${flag} ${l.name.padEnd(28)} ${l.state}${extra}  slots ${l.concurrency}  ok ${l.ok} fail ${l.fail} quota-hits ${l.quotaHits}`);
-    }
-    console.log(`\npool capacity: ${st.filter((l) => l.state === 'ready').reduce((n, l) => n + l.concurrency, 0)} parallel requests`);
-    return 0;
+  return { cfg, pool: new Pool(cfg) };
+}
+
+function cmdPoolAdmin(cfg, o, words) {
+  const { pool } = poolFor(cfg, o);
+  if (words[0] === 'reset') { pool.reset(words[1]); console.log('pool state cleared'); return 0; }
+  const st = pool.status();
+  if (o.json) { console.log(JSON.stringify(st, null, 2)); return 0; }
+  if (!st.length) { console.log('no lanes: no supported agent CLI is installed. Try `maxai install`.'); return 1; }
+  for (const l of st) {
+    const flag = l.state === 'ready' ? '✔' : l.state === 'needs-login' ? '🔑' : '⏳';
+    const extra = l.state === 'ready' ? '' : ` (${l.reason}, ${Math.ceil(l.cooldownSec / 60)}m left)`;
+    console.log(`${flag} ${l.name.padEnd(28)} ${l.state}${extra}  slots ${l.concurrency}  ok ${l.ok} fail ${l.fail} quota-hits ${l.quotaHits}`);
   }
-  if (sub === 'reset') { pool.reset(words[1]); console.log('pool state cleared'); return 0; }
+  console.log(`\npool capacity: ${st.filter((l) => l.state === 'ready').reduce((n, l) => n + l.concurrency, 0)} parallel requests`);
+  return 0;
+}
+
+async function cmdPool(cfg, o, words) {
+  if (words[0] === 'status' && words.length === 1) return cmdPoolAdmin(cfg, o, words);
+  if (words[0] === 'reset' && words.length <= 2) return cmdPoolAdmin(cfg, o, words);
+  return poolRun(cfg, o, words[0] === 'run' ? words.slice(1) : words);
+}
+
+async function poolRun(cfg, o, words) {
+  let pool;
+  ({ cfg, pool } = poolFor(cfg, o));
   const pin = o.agent ? ids(o.agent) : undefined;
   const opts = { pin, cwd: o.cwd, yolo: o.yolo ?? cfg.yolo, wait: !o.noWait };
   if (!pool.lanes.length) throw new Error('no supported agent CLI found on PATH. Run `maxai install`.');
-  pool.on('attempt', (a) => { if (a.kind !== 'ok' && a.kind !== 'aborted') console.error(`maxai: ${a.lane} ${a.kind}${a.err ? ' - ' + lineLabel(a.err, 80) : ''} -> failing over`); });
+  pool.on('attempt', (a) => { if (a.kind !== 'ok' && a.kind !== 'aborted') console.error(`maxai: ${a.lane} ${a.kind}${a.err ? ' - ' + lineLabel(a.err, 80) : ''}`); });
 
   let prompts;
   if (o.batch) {
@@ -193,7 +216,7 @@ async function cmdPool(cfg, o, words) {
     prompts = raw.split('\n').map((l) => l.trim()).filter(Boolean).map((l) => { if (l[0] === '{') { try { return JSON.parse(l).prompt; } catch {} } return l; });
     if (!prompts.length) throw new Error('batch file has no prompts');
   } else {
-    const p = await getPrompt(o, words[0] === 'run' ? words.slice(1) : words);
+    const p = await getPrompt(o, words);
     if (!p) throw new Error('no prompt given');
     prompts = [p];
   }
@@ -248,7 +271,7 @@ async function cmdInstall(cfg, o, words) {
 }
 
 async function cmdUI(cfg, o) {
-  const { url } = await startUI(cfg, { port: o.port ?? 4747, cwd: o.cwd || process.cwd() });
+  const { url } = await startUI(cfg, { port: o.port ?? 4747, cwd: o.cwd || process.cwd(), fallback: o.port == null });
   console.log(`MaxAI UI running at ${url}  (Ctrl+C to stop)`);
   if (o.open) {
     const { spawn } = await import('node:child_process');
@@ -258,25 +281,39 @@ async function cmdUI(cfg, o) {
   return new Promise(() => {}); // run until killed
 }
 
+const SHORTCUTS = new Set([...Object.keys(ADAPTERS), 'q', 'gh', 'oc', 'agy', 'rovo']);
+const NOARG = new Set(['list', 'doctor', 'config', 'ui']);
+const isCommand = (first, rest) => {
+  if (['run', 'pool', 'chat', 'compare'].includes(first)) return true;
+  if (NOARG.has(first)) return !rest.length; // "list the files..." is a prompt, not `list`
+  if (first === 'install') return rest.every((w) => w === 'all' || w === 'missing' || resolveId(w));
+  return false;
+};
+
 export async function main(argv) {
   try {
     const o = parse(argv);
     const cfg = loadConfig();
-    if (o.help || (!o._.length && process.stdin.isTTY)) { console.log(HELP); return 0; }
+    if (o.version) { console.log(`maxaicli ${version()}`); return 0; }
+    if (o.help) { console.log(HELP); return 0; }
+    if (!o._.length && process.stdin.isTTY && process.stdout.isTTY) return await repl(cfg, o);
+    if (!o._.length && process.stdin.isTTY) { console.log(HELP); return 0; }
     const [first, ...rest] = o._;
-    switch (first) {
-      case 'list': case 'doctor': cmdList(cfg, o); return 0;
-      case 'config':
-        console.log(configPaths().map((p) => `${fs.existsSync(p) ? '✔' : '·'} ${p}`).join('\n'));
-        console.log(JSON.stringify(cfg, null, 2)); return 0;
-      case 'install': return await cmdInstall(cfg, o, rest);
-      case 'ui': return await cmdUI(cfg, o);
-      case 'pool': return await cmdPool(cfg, o, rest);
-      case 'run': return await cmdRun(cfg, o, rest);
-      case 'chat': return await cmdChat(cfg, o, rest);
-      case 'compare': return await cmdCompare(cfg, o, rest);
+    if (first && isCommand(first, rest)) {
+      switch (first) {
+        case 'list': case 'doctor': cmdList(cfg, o); return 0;
+        case 'config':
+          console.log(configPaths().map((p) => `${fs.existsSync(p) ? '✔' : '·'} ${p}`).join('\n'));
+          console.log(JSON.stringify(cfg, null, 2)); return 0;
+        case 'install': return await cmdInstall(cfg, o, rest);
+        case 'ui': return await cmdUI(cfg, o);
+        case 'pool': return await cmdPool(cfg, o, rest);
+        case 'run': return await cmdRun(cfg, o, rest);
+        case 'chat': return await cmdChat(cfg, o, rest);
+        case 'compare': return await cmdCompare(cfg, o, rest);
+      }
     }
-    const id = first && resolveId(first);
+    const id = first && SHORTCUTS.has(first.toLowerCase()) && resolveId(first);
     if (id && rest.length) return await cmdRun(cfg, { ...o, agent: id }, rest);
     if (id) return await cmdChat(cfg, { ...o, agent: id }, []);
     return await cmdRun(cfg, o, o._);

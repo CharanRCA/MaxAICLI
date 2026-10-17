@@ -2,25 +2,38 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
-import { ADAPTERS } from './adapters.js';
+import { ADAPTERS, resolveId } from './adapters.js';
 import { locate, buildCommand, runCapture } from './runner.js';
 
 // ---- failure classification ------------------------------------------------
-const QUOTA_RE = /rate.?limit|quota|too many requests|\b429\b|usage limit|limit (has been )?(reached|exceeded)|exceeded .*(limit|quota)|out of (credits|requests)|insufficient (credits|balance)|free (tier|usage|requests?)|overloaded|at capacity|try again (later|in)|resets? (in|at)/i;
-const AUTH_RE = /not logged in|(please|must) (log ?in|sign ?in)|login required|unauthori[sz]ed|\b401\b|authentication (failed|required)|invalid api key|no api key|not authenticated/i;
+const QUOTA_RE = /rate.?limit|quota|too many requests|(http|status|error|code)\D{0,10}429\b|\b429 (too|rate)|usage limit|limit (has been )?(reached|exceeded)|exceeded .*(limit|quota)|out of (credits|requests)|insufficient (credits|balance)|free (tier|usage) .*(limit|exhaust|used|exceed)|overloaded|at capacity|try again (later|in)/i;
+const AUTH_RE = /auth(entication)? login|to authenticate|log ?in (to|with|first)|not signed in|sign in (to|with|first)|not logged in|(please|must) (log ?in|sign ?in)|login required|unauthori[sz]ed|(http|status|error|code)\D{0,10}401\b|authentication (failed|required)|invalid api key|no api key|not authenticated/i;
+// An exit-0 reply only counts as a hidden failure when it is short AND reads like an error line,
+// so a legitimate answer that merely mentions "rate limits" is never penalised.
+const SOFT_FAIL_RE = /^\s*(error|warning|fatal)\b.*(rate.?limit|quota|too many requests|usage limit|limit (reached|exceeded)|overloaded)|^\s*(rate.?limit|quota|usage limit)\b.*(exceeded|reached|hit)/im;
 const UNITS = { s: 1, sec: 1, second: 1, m: 60, min: 60, minute: 60, h: 3600, hr: 3600, hour: 3600 };
 
+const ANSI = /\x1b\[[0-9;]*[A-Za-z]/g;
+
 export function classify({ code, out = '', err = '' }) {
-  const text = `${err}\n${out.length < 600 ? out : out.slice(-300)}`;
-  if (code === 0 && !(out.trim().length < 400 && QUOTA_RE.test(out))) return { kind: 'ok' };
-  if (code === 0 && AUTH_RE.test(out) && out.trim().length < 400) return { kind: 'auth' };
-  if (AUTH_RE.test(text)) return { kind: 'auth' };
-  if (QUOTA_RE.test(text)) {
-    const m = text.match(/(?:try again|retry|reset[s]?)\D{0,20}?(\d+)\s*(seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h)\b/i);
-    const retryAfterSec = m ? Number(m[1]) * (UNITS[m[2].toLowerCase()] ?? UNITS[m[2].toLowerCase().replace(/s$/, '')]) || null : null;
-    return { kind: 'quota', retryAfterSec };
+  out = out.replace(ANSI, ''); err = err.replace(ANSI, '');
+  const short = out.trim().length < 400;
+  if (code === 0) {
+    if (short && SOFT_FAIL_RE.test(out)) return { kind: 'quota', retryAfterSec: retryAfter(out) };
+    if (short && /^\s*(error\b.*)?(not logged in|please (log ?in|sign ?in)|login required|unauthori[sz]ed)/im.test(out)) return { kind: 'auth' };
+    return { kind: 'ok' };
   }
+  const text = `${err}\n${out.length < 600 ? out : out.slice(-300)}`;
+  if (AUTH_RE.test(text)) return { kind: 'auth' };
+  if (QUOTA_RE.test(text)) return { kind: 'quota', retryAfterSec: retryAfter(text) };
   return { kind: 'error' };
+}
+
+function retryAfter(text) {
+  const m = text.match(/(?:try again|retry|reset[s]?)\D{0,20}?(\d+)\s*(seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h)\b/i);
+  if (!m) return null;
+  const u = m[2].toLowerCase();
+  return Number(m[1]) * (UNITS[u] ?? UNITS[u.replace(/s$/, '')]) || null;
 }
 
 // ---- persisted lane state (cooldowns survive between invocations) ----------
@@ -28,14 +41,25 @@ export function statePath() {
   return process.env.MAXAI_STATE || path.join(process.env.XDG_STATE_HOME || path.join(os.homedir(), '.local', 'state'), 'maxai', 'pool.json');
 }
 function loadState(p) { try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return {}; } }
-function saveState(p, s) { try { fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, JSON.stringify(s, null, 1)); } catch {} }
+// Merge into whatever is on disk so concurrent maxai processes don't clobber each other's lanes.
+function saveState(p, mine) {
+  try {
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    const tmp = `${p}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify({ ...loadState(p), ...mine }, null, 1));
+    fs.renameSync(tmp, p);
+  } catch {}
+}
 
 // ---- lanes: each (agent, model) pair is an independent quota bucket ---------
 // config: "pool": { "concurrency": 2, "exclude": ["rovodev"], "lanes": [{ "agent": "opencode", "model": "x/y", "concurrency": 3, "weight": 2 }] }
 export function buildLanes(cfg, installed) {
   const pc = cfg.pool || {};
   const have = new Set(installed);
-  const src = pc.lanes?.length ? pc.lanes : installed.filter((id) => !(pc.exclude || []).includes(id)).map((agent) => ({ agent }));
+  const excluded = new Set((pc.exclude || []).map((x) => resolveId(x) || x));
+  const src = pc.lanes?.length
+    ? pc.lanes.map((l) => ({ ...l, agent: resolveId(l.agent) || l.agent }))
+    : installed.filter((id) => !excluded.has(id)).map((agent) => ({ agent }));
   const seen = new Set();
   return src.filter((l) => have.has(l.agent)).map((l) => {
     const model = l.model ?? cfg.agents?.[l.agent]?.model;
@@ -63,6 +87,7 @@ export class Pool extends EventEmitter {
   cooling(lane) { return this._s(lane).cooldownUntil > this.now(); }
 
   status() {
+    this.st = { ...this.st, ...loadState(this.statePath) }; // pick up other processes' cooldowns
     return this.lanes.map((l) => {
       const s = this._s(l), cd = Math.max(0, s.cooldownUntil - this.now());
       return { name: l.name, agent: l.agent, model: l.model, concurrency: l.concurrency, weight: l.weight, inFlight: l.inFlight,
@@ -102,7 +127,7 @@ export class Pool extends EventEmitter {
     if (cls.kind === 'ok') { s.ok++; s.streak = 0; if (s.reason !== 'auth') { s.cooldownUntil = 0; s.reason = null; } }
     else if (cls.kind !== 'aborted') this._penalize(lane, cls);
     this._save();
-    const attempt = { lane: lane.name, agent: lane.agent, kind: cls.kind, code: r.code, ms: r.ms, err: cls.kind === 'ok' ? undefined : (r.err || '').trim().split('\n').pop() };
+    const attempt = { lane: lane.name, agent: lane.agent, kind: cls.kind, code: r.code, ms: r.ms, err: cls.kind === 'ok' ? undefined : (r.err || '').replace(ANSI, '').trim().split('\n').pop() };
     this.emit('attempt', attempt);
     return { r, cls, attempt };
   }

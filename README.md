@@ -14,18 +14,34 @@ One command-line front end for nine coding-agent CLIs. Zero dependencies, Node �
 | `kimi` | Kimi Code CLI | `kimi` |
 | `droid` | Droid CLI | `droid` |
 
+## Install it as a program
+
+| way | command |
+|---|---|
+| standalone binary (no Node needed) | download `maxaicli-<os>-<arch>` from the Releases page, `chmod +x`, put it on PATH |
+| from a checkout (needs Node ≥ 18) | `./install.sh` → `~/.local/bin/maxai` and `maxaicli` (`./uninstall.sh` removes) |
+| via npm | `npm i -g .` (both `maxai` and `maxaicli` commands) |
+| build the binary yourself | `npm ci && npm run build:binary` → `dist/maxaicli-<os>-<arch>` |
+
+`npm run build` makes a dependency-free single file, `dist/maxaicli.cjs`. Tagging `vX.Y.Z`
+builds Linux/macOS/Windows binaries in CI (`.github/workflows/release.yml`). Windows binaries are
+built but the agent installers and path handling are only exercised on Linux/macOS.
+
+Run `maxai` with no arguments for an interactive session on the pool (`/race`, `/status`,
+`/pin`, `/ui`, ...).
+
 `maxai` does not reimplement these tools; it detects what you have installed and
 translates one interface into each tool's native flags.
 
 ```
-npm link                                  # install `maxai` globally from this checkout
 maxai list                                # which agents are installed
 maxai "add input validation to api.ts"    # auto-routes to an installed agent
 maxai droid "fix the failing tests"       # specific agent (aliases: gh, q, agy, rovo, oc ...)
 maxai run -a amp -f droid,kiro "task"     # fallback chain if the first one fails
 maxai compare -a all "explain this repo"  # run on every installed agent in parallel
 maxai chat -a opencode                    # hand the terminal to that agent's TUI
-git diff | maxai -a copilot "review this" # piped stdin is appended to the prompt
+git diff | maxai -a copilot --stdin "review this"  # --stdin appends piped input to the prompt
+cat prompt.txt | maxai -a droid           # with no prompt words, stdin is the prompt
 maxai --dry-run -a kiro "hi"              # show the exact command without running
 ```
 
@@ -41,7 +57,9 @@ maxai install all --dry-run               # show what would run
 ```
 
 Flags: `-a agent[,agent]`, `-m model`, `-f fallbacks`, `-C dir`, `-y/--yolo` (auto-approve tools),
-`--json`, `--timeout sec`, `--dry-run`.
+`--json`, `--timeout sec`, `--dry-run`, `--stdin`, `-v/--version`.
+A prompt whose first word is a command name (`maxai list the files in src`) is still treated as a prompt;
+only an exact `maxai list` is the command.
 
 ## The pool (combined free quota)
 

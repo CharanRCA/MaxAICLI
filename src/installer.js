@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { ADAPTERS } from './adapters.js';
@@ -30,12 +31,20 @@ export const RECIPES = {
   droid: [{ needs: 'curl', sh: 'curl -fsSL https://app.factory.ai/cli | sh' }],
 };
 
+const versionCache = new Map(); // path:mtime -> version, so UI refreshes don't respawn every CLI
+
 export async function status(id, cfg) {
   const path = locate(id, cfg);
   let version = null;
   if (path) {
-    const r = await runCapture({ command: path, args: [...(ADAPTERS[id].prefix || []), '--version'] }, { timeoutMs: 5000 });
-    if (r.code === 0) version = (r.out || r.err).trim().split('\n')[0].slice(0, 80) || null;
+    let key = path;
+    try { key += ':' + fs.statSync(path).mtimeMs; } catch {}
+    if (versionCache.has(key)) version = versionCache.get(key);
+    else {
+      const r = await runCapture({ command: path, args: ['--version'] }, { timeoutMs: 5000 });
+      if (r.code === 0) version = (r.out || r.err).trim().split('\n')[0].slice(0, 80) || null;
+      versionCache.set(key, version);
+    }
   }
   return { id, name: ADAPTERS[id].name, installed: !!path, path, version };
 }
@@ -56,11 +65,13 @@ export const describe = (r) => (r.sh ? r.sh : r.argv.join(' '));
 // Execute a recipe, streaming output through onData. Resolves to exit code.
 export function execRecipe(r, onData) {
   return new Promise((resolve) => {
+    const stdio = ['ignore', 'pipe', 'pipe'];
     const c = r.sh
-      ? spawn('bash', ['-o', 'pipefail', '-c', r.sh], { stdio: ['ignore', 'pipe', 'pipe'], env: process.env, cwd: os.homedir() })
-      : spawn(r.argv[0], r.argv.slice(1), { stdio: ['ignore', 'pipe', 'pipe'] });
-    c.stdout.on('data', (d) => onData?.(String(d)));
-    c.stderr.on('data', (d) => onData?.(String(d)));
+      ? spawn(...(which('bash') ? ['bash', ['-o', 'pipefail', '-c', r.sh]] : ['sh', ['-c', r.sh]]), { stdio, cwd: os.homedir() })
+      : spawn(r.argv[0], r.argv.slice(1), { stdio });
+    c.stdout.setEncoding('utf8'); c.stderr.setEncoding('utf8');
+    c.stdout.on('data', (d) => onData?.(d));
+    c.stderr.on('data', (d) => onData?.(d));
     c.on('error', (e) => { onData?.(`${e.message}\n`); resolve(127); });
     c.on('close', (code) => resolve(code ?? 1));
   });
