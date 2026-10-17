@@ -1,0 +1,16 @@
+{
+  "name": "maxaicli",
+  "version": "1.0.0",
+  "description": "A fast, dependency-free command-line chat client for Claude with streaming, saved history and config.",
+  "type": "module",
+  "bin": { "maxaicli": "bin/maxaicli.js" },
+  "main": "src/cli.js",
+  "files": ["bin", "src", "README.md"],
+  "scripts": {
+    "start": "node bin/maxaicli.js",
+    "test": "node --test test/*.test.js"
+  },
+  "engines": { "node": ">=18" },
+  "keywords": ["claude", "anthropic", "cli", "chat", "ai"],
+  "license": "MIT"
+}
