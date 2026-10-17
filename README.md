@@ -29,8 +29,32 @@ git diff | maxai -a copilot "review this" # piped stdin is appended to the promp
 maxai --dry-run -a kiro "hi"              # show the exact command without running
 ```
 
+```
+maxai ui --open                           # local web UI (http://127.0.0.1:4747)
+maxai install                             # install every missing agent CLI (asks first)
+maxai install opencode droid --yes        # specific ones, no prompt
+maxai install all --dry-run               # show what would run
+```
+
 Flags: `-a agent[,agent]`, `-m model`, `-f fallbacks`, `-C dir`, `-y/--yolo` (auto-approve tools),
 `--json`, `--timeout sec`, `--dry-run`.
+
+## Web UI
+
+`maxai ui` serves a local page: agent list with install status/version, one-click install
+with live logs, a prompt box, and side-by-side streaming output when several agents are
+selected. It binds to loopback only, checks the Host header and requires a per-launch
+token, because it can execute commands on your machine.
+
+## Installer
+
+`maxai install` checks each agent first (PATH plus common install dirs such as
+`~/.local/bin`, `~/.opencode/bin`, `~/.factory/bin`) and skips those already present
+(`--force` reinstalls). Otherwise it picks the first usable recipe (npm, curl script,
+uv/pipx, brew), shows the exact command, and asks before running. Non-interactive use
+requires `--yes`. Recipes live in `src/installer.js`. Antigravity has no scripted
+installer, and Rovo Dev needs Homebrew, so those fall back to printing manual
+instructions. As with the flags, the install commands are unverified against the vendors' current docs.
 
 ## Config
 

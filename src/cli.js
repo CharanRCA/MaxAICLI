@@ -3,6 +3,9 @@ import { ADAPTERS, resolveId } from './adapters.js';
 import { loadConfig, configPaths } from './config.js';
 import { locate, buildCommand, runInherit, runCapture } from './runner.js';
 import { pickAgent } from './router.js';
+import { status, plan, describe, installAgent } from './installer.js';
+import { startUI } from './ui.js';
+import readline from 'node:readline/promises';
 
 const HELP = `maxai - one CLI for many coding agents
 
@@ -12,6 +15,8 @@ Usage:
   maxai chat [-a agent] [prompt]      interactive session in that agent's own TUI
   maxai compare [-a a,b|all] <prompt> run on several agents in parallel, print side by side
   maxai list                          show agents and whether they are installed
+  maxai install [ids|all]             install agent CLIs (skips ones already present)
+  maxai ui [--port N] [--open]        local web UI: run, compare, install from the browser
   maxai config                        show config file locations / merged config
 
 Options:
@@ -24,6 +29,7 @@ Options:
       --dry-run           print the command that would run
       --timeout <sec>     kill an agent after N seconds (compare/fallback/json)
   -h, --help
+Install options: --yes (no confirmation), --force (reinstall even if present), --dry-run
 Prompt may also be piped on stdin.
 `;
 
@@ -40,6 +46,10 @@ function parse(argv) {
     else if (a === '--timeout') o.timeout = Number(val());
     else if (a === '-y' || a === '--yolo') o.yolo = true;
     else if (a === '--json') o.json = true;
+    else if (a === '--yes') o.yes = true;
+    else if (a === '--force') o.force = true;
+    else if (a === '--open') o.open = true;
+    else if (a === '--port') o.port = Number(val());
     else if (a === '--dry-run') o.dry = true;
     else if (a === '-h' || a === '--help') o.help = true;
     else if (a.startsWith('-') && a.length > 1) throw new Error(`unknown option ${a}`);
@@ -141,6 +151,49 @@ async function cmdChat(cfg, o, words) {
   return runInherit(cmd, { cwd: o.cwd });
 }
 
+async function cmdInstall(cfg, o, words) {
+  const want = !words.length || words.includes('missing') ? 'missing' : words.includes('all') ? 'all' : null;
+  const targets = want ? Object.keys(ADAPTERS) : words.flatMap((w) => ids(w));
+  const sts = await Promise.all(targets.map((id) => status(id, cfg)));
+  const todo = [];
+  for (const s of sts) {
+    if (s.installed && !o.force) { console.log(`✔ ${s.id.padEnd(12)} already installed (${s.version || s.path})`); continue; }
+    const p = plan(s.id);
+    if (!p.recipe) { console.log(`! ${s.id.padEnd(12)} manual install: ${p.manual}`); continue; }
+    todo.push([s.id, p.recipe]);
+  }
+  if (!todo.length) return 0;
+  console.log('\nWill run:');
+  for (const [id, r] of todo) console.log(`  ${id.padEnd(12)} ${describe(r)}`);
+  if (o.dry) return 0;
+  if (!o.yes) {
+    if (!process.stdin.isTTY) throw new Error('refusing to run installers non-interactively without --yes');
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    const a = (await rl.question('\nProceed? These execute remote install scripts / package installs [y/N] ')).trim().toLowerCase();
+    rl.close();
+    if (a !== 'y' && a !== 'yes') { console.log('aborted'); return 1; }
+  }
+  let bad = 0;
+  for (const [id] of todo) {
+    console.log(`\n=== ${id} ===`);
+    const r = await installAgent(id, cfg, { force: o.force, onData: (d) => process.stdout.write(d) });
+    console.log(`-> ${r.result}${r.path ? ' ' + r.path : ''}${r.hint ? ' - ' + r.hint : ''}`);
+    if (r.result === 'failed') bad++;
+  }
+  return bad ? 1 : 0;
+}
+
+async function cmdUI(cfg, o) {
+  const { url } = await startUI(cfg, { port: o.port ?? 4747, cwd: o.cwd || process.cwd() });
+  console.log(`MaxAI UI running at ${url}  (Ctrl+C to stop)`);
+  if (o.open) {
+    const { spawn } = await import('node:child_process');
+    const opener = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'cmd' : 'xdg-open';
+    spawn(opener, process.platform === 'win32' ? ['/c', 'start', url] : [url], { stdio: 'ignore', detached: true }).on('error', () => {}).unref();
+  }
+  return new Promise(() => {}); // run until killed
+}
+
 export async function main(argv) {
   try {
     const o = parse(argv);
@@ -152,6 +205,8 @@ export async function main(argv) {
       case 'config':
         console.log(configPaths().map((p) => `${fs.existsSync(p) ? '✔' : '·'} ${p}`).join('\n'));
         console.log(JSON.stringify(cfg, null, 2)); return 0;
+      case 'install': return await cmdInstall(cfg, o, rest);
+      case 'ui': return await cmdUI(cfg, o);
       case 'run': return await cmdRun(cfg, o, rest);
       case 'chat': return await cmdChat(cfg, o, rest);
       case 'compare': return await cmdCompare(cfg, o, rest);

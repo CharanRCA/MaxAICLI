@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MaxAI</title>
+<style>
+:root{--bg:#f6f7f9;--panel:#fff;--ink:#16181d;--mute:#6b7280;--line:#e3e6eb;--acc:#5b5bf0;--acc-ink:#fff;--ok:#16a34a;--bad:#dc2626;--warn:#d97706;--code:#0f1115;--code-ink:#d7dae0;--r:12px}
+@media (prefers-color-scheme:dark){:root{--bg:#0e1014;--panel:#171a21;--ink:#e8eaef;--mute:#8b93a1;--line:#272b35;--acc:#7c7cff;--acc-ink:#0e1014;--code:#0a0c10}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+header{display:flex;align-items:center;gap:12px;padding:14px 20px;border-bottom:1px solid var(--line);background:var(--panel)}
+header h1{font-size:17px;margin:0;letter-spacing:-.01em}
+header .tag{color:var(--mute);font-size:12.5px}
+.logo{width:26px;height:26px;border-radius:8px;background:linear-gradient(135deg,var(--acc),#c084fc);display:grid;place-items:center;color:#fff;font-weight:700;font-size:13px}
+.spacer{flex:1}
+main{display:grid;grid-template-columns:320px 1fr;gap:16px;padding:16px 20px;max-width:1500px;margin:0 auto}
+@media(max-width:860px){main{grid-template-columns:1fr}}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--r)}
+.card h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mute);margin:0;padding:14px 16px 8px;font-weight:600;display:flex;align-items:center}
+.card h2 .spacer{flex:1}
+.agent{display:grid;grid-template-columns:auto 1fr auto;gap:10px;align-items:center;padding:10px 16px;border-top:1px solid var(--line)}
+.agent:first-of-type{border-top:0}
+.agent input{width:16px;height:16px;accent-color:var(--acc)}
+.agent .nm{font-weight:600}
+.agent .sub{font-size:12px;color:var(--mute);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:170px}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--mute);margin-right:6px}
+.dot.ok{background:var(--ok)}.dot.bad{background:var(--bad)}
+button{font:inherit;cursor:pointer;border:1px solid var(--line);background:var(--panel);color:var(--ink);padding:6px 12px;border-radius:8px}
+button:hover{border-color:var(--acc)}
+button.primary{background:var(--acc);color:var(--acc-ink);border-color:var(--acc);font-weight:600;padding:9px 20px}
+button.small{padding:3px 9px;font-size:12px}
+button:disabled{opacity:.5;cursor:default}
+.composer{padding:0 16px 16px}
+textarea{width:100%;min-height:110px;resize:vertical;border:1px solid var(--line);border-radius:10px;padding:12px;background:var(--bg);color:var(--ink);font:inherit}
+textarea:focus,input[type=text]:focus{outline:2px solid color-mix(in srgb,var(--acc) 40%,transparent);border-color:var(--acc)}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:10px}
+input[type=text]{border:1px solid var(--line);border-radius:8px;padding:7px 10px;background:var(--bg);color:var(--ink);font:inherit}
+label.chk{display:flex;gap:6px;align-items:center;color:var(--mute);font-size:13px}
+.hint{color:var(--mute);font-size:12px}
+#results{display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:14px;margin-top:16px}
+@media(max-width:480px){#results{grid-template-columns:1fr}}
+.res{overflow:hidden}
+.res .hd{display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--line)}
+.res .hd b{flex:1}
+.pill{font-size:11.5px;padding:2px 8px;border-radius:99px;border:1px solid var(--line);color:var(--mute)}
+.pill.run{color:var(--warn);border-color:var(--warn)}.pill.ok{color:var(--ok);border-color:var(--ok)}.pill.bad{color:var(--bad);border-color:var(--bad)}
+pre{margin:0;padding:12px 14px;background:var(--code);color:var(--code-ink);font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;word-break:break-word;max-height:420px;overflow:auto;min-height:60px}
+pre .e{color:#f59e0b}
+.cmd{padding:6px 14px;font:11.5px ui-monospace,monospace;color:var(--mute);border-bottom:1px solid var(--line);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.empty{padding:36px;text-align:center;color:var(--mute)}
+dialog{border:1px solid var(--line);border-radius:var(--r);background:var(--panel);color:var(--ink);width:min(720px,94vw);padding:0}
+dialog::backdrop{background:#0008}
+dialog .hd{display:flex;align-items:center;padding:12px 16px;border-bottom:1px solid var(--line)}
+dialog .hd b{flex:1}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">M</div><h1>MaxAI</h1><span class="tag">one front end for nine coding agents</span>
+  <div class="spacer"></div>
+  <button id="refresh" class="small">Refresh</button>
+  <button id="instAll" class="small">Install all missing</button>
+</header>
+<main>
+  <aside class="card">
+    <h2>Agents <span class="spacer"></span><a href="#" id="selInst" class="hint">select installed</a></h2>
+    <div id="agents"></div>
+  </aside>
+  <section>
+    <div class="card">
+      <h2>Prompt</h2>
+      <div class="composer">
+        <textarea id="prompt" placeholder="Ask any agent... (Ctrl/Cmd+Enter to run). Select several agents on the left to compare them side by side."></textarea>
+        <div class="row">
+          <input type="text" id="model" placeholder="model (optional)" size="18">
+          <input type="text" id="dir" size="30" value="__CWD__" title="working directory">
+          <label class="chk"><input type="checkbox" id="yolo"> auto-approve tools</label>
+          <span class="spacer"></span>
+          <button id="stop" disabled>Stop</button>
+          <button id="run" class="primary">Run</button>
+        </div>
+        <div class="hint" id="selHint" style="margin-top:8px"></div>
+      </div>
+    </div>
+    <div id="results"><div class="card empty" style="grid-column:1/-1">Results appear here.</div></div>
+  </section>
+</main>
+<dialog id="log"><div class="hd"><b id="logT">Install</b><button id="logX" class="small">Close</button></div><pre id="logP" style="max-height:60vh"></pre></dialog>
+<script>
+const TOKEN='__TOKEN__';
+const $=s=>document.querySelector(s);
+const H={'x-maxai-token':TOKEN,'content-type':'application/json'};
+let agents=[],sel=new Set(),ctl=null;
+try{sel=new Set(JSON.parse(localStorage.getItem('maxai.sel')||'[]'));$('#prompt').value=localStorage.getItem('maxai.prompt')||''}catch{}
+
+async function ndjson(path,body,onEv,signal){
+  const r=await fetch(path,{method:'POST',headers:H,body:JSON.stringify(body),signal});
+  if(!r.ok||!r.body)throw new Error((await r.json().catch(()=>({}))).error||r.status);
+  const rd=r.body.getReader(),dec=new TextDecoder();let buf='';
+  for(;;){const{done,value}=await rd.read();if(done)break;buf+=dec.decode(value,{stream:true});
+    let i;while((i=buf.indexOf('\n'))>=0){const l=buf.slice(0,i);buf=buf.slice(i+1);if(l.trim())onEv(JSON.parse(l))}}
+}
+function el(t,c,txt){const e=document.createElement(t);if(c)e.className=c;if(txt!=null)e.textContent=txt;return e}
+
+async function load(){
+  const r=await fetch('/api/agents',{headers:H});agents=await r.json();
+  const first=!localStorage.getItem('maxai.sel');
+  if(first)agents.filter(a=>a.installed).slice(0,1).forEach(a=>sel.add(a.id));
+  render();
+}
+function render(){
+  const box=$('#agents');box.textContent='';
+  for(const a of agents){
+    const row=el('div','agent'),cb=el('input');cb.type='checkbox';cb.disabled=!a.installed;cb.checked=a.installed&&sel.has(a.id);
+    cb.onchange=()=>{cb.checked?sel.add(a.id):sel.delete(a.id);save()};
+    const mid=el('div'),nm=el('div','nm');nm.append(Object.assign(el('span','dot '+(a.installed?'ok':'bad')),{}),a.name);
+    mid.append(nm,el('div','sub',a.installed?(a.version||a.path):(a.installCmd||a.manual||'not installed')));
+    mid.title=a.installed?a.path:(a.installCmd||a.manual||'');
+    row.append(cb,mid);
+    if(!a.installed){const b=el('button','small',a.installCmd?'Install':'How');b.onclick=()=>install([a.id]);row.append(b)}
+    else row.append(el('span','hint','ready'));
+    box.append(row);
+  }
+  const n=[...sel].filter(id=>agents.find(a=>a.id===id&&a.installed)).length;
+  $('#selHint').textContent=n?`${n} agent${n>1?'s':''} selected${n>1?' - running in parallel':''}`:'Select at least one installed agent.';
+}
+const save=()=>{try{localStorage.setItem('maxai.sel',JSON.stringify([...sel]));localStorage.setItem('maxai.prompt',$('#prompt').value)}catch{};render()};
+
+$('#selInst').onclick=e=>{e.preventDefault();sel=new Set(agents.filter(a=>a.installed).map(a=>a.id));save()};
+$('#refresh').onclick=load;
+$('#prompt').oninput=()=>{try{localStorage.setItem('maxai.prompt',$('#prompt').value)}catch{}};
+$('#prompt').onkeydown=e=>{if(e.key==='Enter'&&(e.ctrlKey||e.metaKey))run()};
+$('#run').onclick=run;
+$('#stop').onclick=()=>ctl&&ctl.abort();
+$('#logX').onclick=()=>$('#log').close();
+$('#instAll').onclick=()=>install(agents.filter(a=>!a.installed).map(a=>a.id));
+
+async function run(){
+  const prompt=$('#prompt').value.trim();
+  const ids=[...sel].filter(id=>agents.find(a=>a.id===id&&a.installed));
+  if(!prompt||!ids.length){$('#selHint').textContent=!prompt?'Type a prompt first.':'Select at least one installed agent.';return}
+  const out=$('#results');out.textContent='';
+  const P={};
+  for(const id of ids){
+    const a=agents.find(x=>x.id===id),c=el('div','card res'),hd=el('div','hd'),pill=el('span','pill run','running');
+    const cmd=el('div','cmd','starting...'),pre=el('pre');
+    hd.append(el('b','',a.name),pill);c.append(hd,cmd,pre);out.append(c);P[id]={pill,cmd,pre};
+  }
+  ctl=new AbortController();$('#run').disabled=true;$('#stop').disabled=false;
+  try{
+    await ndjson('/api/run',{prompt,agents:ids,model:$('#model').value.trim(),yolo:$('#yolo').checked,dir:$('#dir').value.trim()||undefined},ev=>{
+      const p=P[ev.agent];if(!p)return;
+      if(ev.type==='start')p.cmd.textContent='$ '+ev.cmd+' <prompt>';
+      else if(ev.type==='out'||ev.type==='err'){const s=el('span',ev.type==='err'?'e':'',ev.data);p.pre.append(s);p.pre.scrollTop=p.pre.scrollHeight}
+      else if(ev.type==='exit'){const ok=ev.code===0;p.pill.className='pill '+(ok?'ok':'bad');p.pill.textContent=ok?`done ${(ev.ms/1000).toFixed(1)}s`:`exit ${ev.code}`;if(ev.err)p.pre.append(el('span','e',ev.err))}
+    },ctl.signal);
+  }catch(e){if(e.name!=='AbortError')out.prepend(el('div','card empty','Error: '+e.message))}
+  for(const p of Object.values(P))if(p.pill.textContent==='running'){p.pill.className='pill bad';p.pill.textContent='stopped'}
+  $('#run').disabled=false;$('#stop').disabled=true;
+}
+
+async function install(ids){
+  if(!ids.length){alert('Everything is already installed.');return}
+  const d=$('#log'),pre=$('#logP');pre.textContent='';$('#logT').textContent='Installing: '+ids.join(', ');d.showModal();
+  const add=(t)=>{pre.append(document.createTextNode(t));pre.scrollTop=pre.scrollHeight};
+  try{
+    await ndjson('/api/install',{agents:ids},ev=>{
+      if(ev.type==='start')add(`\n=== ${ev.agent} ===\n`);
+      else if(ev.type==='out')add(ev.data);
+      else if(ev.type==='done'){
+        const m={'already-installed':'already installed at '+ev.path,installed:'installed '+(ev.path||''),manual:'manual install needed: '+ev.manual,failed:'FAILED (exit '+ev.code+') '+(ev.hint||'')};
+        add(`-> ${m[ev.result]||ev.result}\n`)}
+    });
+  }catch(e){add('\nError: '+e.message+'\n')}
+  add('\nFinished.\n');load();
+}
+load();
+</script>
+</body>
+</html>
